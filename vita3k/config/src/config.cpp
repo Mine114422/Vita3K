@@ -36,6 +36,10 @@
 #include <vector>
 
 namespace config {
+static void sync_update_preferences(Config &self) {
+    self.check_for_updates = self.check_for_updates_mode != static_cast<int>(UPDATE_STARTUP_OFF);
+}
+
 // Update the members of the Config object based on the YAML node.
 // Use this function when the YAML file is updated before the members.
 static void update_members(Config &self, const YAML::Node &p_yaml_node) {
@@ -48,10 +52,40 @@ static void update_members(Config &self, const YAML::Node &p_yaml_node) {
 
     CONFIG_LIST(UPDATE_MEMBERS)
 #undef UPDATE_MEMBERS
+
+    if (!p_yaml_node["check-for-updates-mode"].IsDefined() && p_yaml_node["check-for-updates"].IsDefined()) {
+        self.check_for_updates_mode = p_yaml_node["check-for-updates"].as<bool>()
+            ? static_cast<int>(UPDATE_STARTUP_PROMPT)
+            : static_cast<int>(UPDATE_STARTUP_OFF);
+    }
+
+    sync_update_preferences(self);
 #ifdef TRACY_ENABLE
     tracy_module_utils::cleanup(self.tracy_advanced_profiling_modules);
     tracy_module_utils::load_from(self.tracy_advanced_profiling_modules);
 #endif
+}
+
+// to be removed eventually
+static bool has_legacy_config(const YAML::Node &yaml_node) {
+    static constexpr std::array legacy_markers = {
+        "show-gui",
+        "show-info-bar",
+        "display-system-apps",
+        "icon-size",
+        "bgm-volume",
+        "show-touchpad-cursor",
+        "enable-gamepad-overlay",
+        "overlay-show-touch-switch",
+        "overlay-scale",
+        "overlay-opacity",
+        "display-info-message",
+        "asia-font-support"
+    };
+
+    return std::any_of(legacy_markers.begin(), legacy_markers.end(), [&yaml_node](const char *marker) {
+        return yaml_node[marker].IsDefined();
+    });
 }
 
 static void update_members(Config &self, const Config &rhs) {
@@ -60,6 +94,7 @@ static void update_members(Config &self, const Config &rhs) {
 
     CONFIG_LIST(UPDATE_MEMBERS)
 #undef UPDATE_MEMBERS
+    sync_update_preferences(self);
 #ifdef TRACY_ENABLE
     tracy_module_utils::cleanup(self.tracy_advanced_profiling_modules);
     tracy_module_utils::load_from(self.tracy_advanced_profiling_modules);
@@ -118,6 +153,7 @@ static void merge(Config &self, const Config &rhs) {
 #undef COMBINE_VECTOR
 
     check_members(self, rhs);
+    sync_update_preferences(self);
 }
 
 // Generate a YAML node based on the current values of the members.
@@ -130,14 +166,18 @@ static YAML::Node get(const Config &self) {
     CONFIG_LIST(GEN_VALUES)
 #undef GEN_VALUES
 
+    out.remove("check-for-updates");
+
     return out;
 }
 
 // Load a function to the node network, and then update the members
-static void load_new_config(Config &self, const fs::path &path) {
+static bool load_new_config(Config &self, const fs::path &path) {
     fs::ifstream fin(path);
     YAML::Node yaml_node = YAML::Load(fin);
+    const bool legacy_conf = has_legacy_config(yaml_node);
     update_members(self, yaml_node);
+    return legacy_conf;
 }
 
 static std::set<std::string> get_file_set(const fs::path &loc, bool dirs_only = true) {
@@ -172,6 +212,78 @@ static fs::path check_path(const fs::path &output_path) {
     return output_path;
 }
 
+void reset_keyboard_bindings(Config &cfg) {
+    const Config defaults{};
+
+#define RESET_KEYBOARD_BINDING(member_name) cfg.member_name = defaults.member_name
+    RESET_KEYBOARD_BINDING(keyboard_button_select);
+    RESET_KEYBOARD_BINDING(keyboard_button_start);
+    RESET_KEYBOARD_BINDING(keyboard_button_up);
+    RESET_KEYBOARD_BINDING(keyboard_button_right);
+    RESET_KEYBOARD_BINDING(keyboard_button_down);
+    RESET_KEYBOARD_BINDING(keyboard_button_left);
+    RESET_KEYBOARD_BINDING(keyboard_button_l1);
+    RESET_KEYBOARD_BINDING(keyboard_button_r1);
+    RESET_KEYBOARD_BINDING(keyboard_button_l2);
+    RESET_KEYBOARD_BINDING(keyboard_button_r2);
+    RESET_KEYBOARD_BINDING(keyboard_button_l3);
+    RESET_KEYBOARD_BINDING(keyboard_button_r3);
+    RESET_KEYBOARD_BINDING(keyboard_button_triangle);
+    RESET_KEYBOARD_BINDING(keyboard_button_circle);
+    RESET_KEYBOARD_BINDING(keyboard_button_cross);
+    RESET_KEYBOARD_BINDING(keyboard_button_square);
+    RESET_KEYBOARD_BINDING(keyboard_leftstick_left);
+    RESET_KEYBOARD_BINDING(keyboard_leftstick_right);
+    RESET_KEYBOARD_BINDING(keyboard_leftstick_up);
+    RESET_KEYBOARD_BINDING(keyboard_leftstick_down);
+    RESET_KEYBOARD_BINDING(keyboard_rightstick_left);
+    RESET_KEYBOARD_BINDING(keyboard_rightstick_right);
+    RESET_KEYBOARD_BINDING(keyboard_rightstick_up);
+    RESET_KEYBOARD_BINDING(keyboard_rightstick_down);
+    RESET_KEYBOARD_BINDING(keyboard_button_psbutton);
+    RESET_KEYBOARD_BINDING(keyboard_gui_toggle_gui);
+    RESET_KEYBOARD_BINDING(keyboard_gui_fullscreen);
+    RESET_KEYBOARD_BINDING(keyboard_gui_toggle_touch);
+    RESET_KEYBOARD_BINDING(keyboard_toggle_texture_replacement);
+    RESET_KEYBOARD_BINDING(keyboard_take_screenshot);
+    RESET_KEYBOARD_BINDING(keyboard_pinch_modifier);
+    RESET_KEYBOARD_BINDING(keyboard_alternate_pinch_in);
+    RESET_KEYBOARD_BINDING(keyboard_alternate_pinch_out);
+    RESET_KEYBOARD_BINDING(keyboard_button_select_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_start_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_up_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_right_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_down_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_left_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_l1_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_r1_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_l2_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_r2_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_l3_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_r3_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_triangle_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_circle_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_cross_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_square_alt);
+    RESET_KEYBOARD_BINDING(keyboard_leftstick_left_alt);
+    RESET_KEYBOARD_BINDING(keyboard_leftstick_right_alt);
+    RESET_KEYBOARD_BINDING(keyboard_leftstick_up_alt);
+    RESET_KEYBOARD_BINDING(keyboard_leftstick_down_alt);
+    RESET_KEYBOARD_BINDING(keyboard_rightstick_left_alt);
+    RESET_KEYBOARD_BINDING(keyboard_rightstick_right_alt);
+    RESET_KEYBOARD_BINDING(keyboard_rightstick_up_alt);
+    RESET_KEYBOARD_BINDING(keyboard_rightstick_down_alt);
+    RESET_KEYBOARD_BINDING(keyboard_button_psbutton_alt);
+    RESET_KEYBOARD_BINDING(keyboard_gui_fullscreen_alt);
+    RESET_KEYBOARD_BINDING(keyboard_gui_toggle_touch_alt);
+    RESET_KEYBOARD_BINDING(keyboard_toggle_texture_replacement_alt);
+    RESET_KEYBOARD_BINDING(keyboard_take_screenshot_alt);
+    RESET_KEYBOARD_BINDING(keyboard_pinch_modifier_alt);
+    RESET_KEYBOARD_BINDING(keyboard_alternate_pinch_in_alt);
+    RESET_KEYBOARD_BINDING(keyboard_alternate_pinch_out_alt);
+#undef RESET_KEYBOARD_BINDING
+}
+
 static ExitCode parse(Config &cfg, const fs::path &load_path, const fs::path &root_pref_path) {
     const auto loaded_path = check_path(load_path);
     if (loaded_path.empty() || !fs::exists(loaded_path)) {
@@ -180,7 +292,10 @@ static ExitCode parse(Config &cfg, const fs::path &load_path, const fs::path &ro
     }
 
     try {
-        load_new_config(cfg, loaded_path);
+        if (load_new_config(cfg, loaded_path)) {
+            reset_keyboard_bindings(cfg);
+            LOG_INFO("Legacy SDL keyboard config detected; keyboard bindings were reset to Qt defaults.");
+        }
     } catch (YAML::Exception &exception) {
         LOG_ERROR("Config file can't be loaded: Error: {}", exception.what());
         return FileNotFound;
