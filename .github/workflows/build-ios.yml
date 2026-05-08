@@ -1,0 +1,225 @@
+name: Build Vita3K iOS IPA
+
+on:
+  push:
+    branches:
+      - native-ios-port
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag สำหรับ release (เช่น v1.0.0) — ถ้าว่างจะใช้ commit SHA'
+        required: false
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ios:
+    name: Build iOS IPA
+    runs-on: macos-15
+
+    steps:
+      # ─── 1. Checkout ───────────────────────────────────────────────
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # ─── 2. Setup Xcode ────────────────────────────────────────────
+      - name: Select Xcode 16
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.2'
+
+      # ─── 3. Cache Homebrew packages ────────────────────────────────
+      - name: Cache Homebrew
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            /opt/homebrew/Cellar/cmake
+            /opt/homebrew/Cellar/ninja
+            /opt/homebrew/Cellar/ldid
+          key: homebrew-${{ runner.os }}-${{ hashFiles('.github/workflows/build-ios.yml') }}
+          restore-keys: |
+            homebrew-${{ runner.os }}-
+
+      # ─── 4. Install dependencies ───────────────────────────────────
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install cmake ninja ldid || true
+
+      # ─── 5. Cache CMake build ──────────────────────────────────────
+      - name: Cache CMake build directory
+        uses: actions/cache@v4
+        with:
+          path: build/ios-xcode
+          key: cmake-ios-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
+          restore-keys: |
+            cmake-ios-${{ runner.os }}-
+
+      # ─── 6. Configure with CMake (iOS cross-compile) ───────────────
+      - name: Configure CMake for iOS
+        run: |
+          cmake \
+            -G "Xcode" \
+            -B build/ios-xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY="" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVITA3K_ENABLE_JIT=ON \
+            .
+
+      # ─── 7. Build ──────────────────────────────────────────────────
+      - name: Build Vita3K (Release)
+        run: |
+          cmake --build build/ios-xcode \
+            --config Release \
+            --target vita3k \
+            -- \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            -jobs $(sysctl -n hw.logicalcpu)
+
+      # ─── 8. Find .app bundle ───────────────────────────────────────
+      - name: Locate .app bundle
+        id: locate_app
+        run: |
+          APP_PATH=$(find build/ios-xcode -name "*.app" -type d | head -1)
+          echo "Found app: $APP_PATH"
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      # ─── 9. Inject JIT entitlements with ldid ──────────────────────
+      - name: Inject JIT entitlements
+        run: |
+          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
+          BINARY_NAME=$(basename "$APP_PATH" .app)
+          BINARY="$APP_PATH/$BINARY_NAME"
+
+          cat > /tmp/vita3k_entitlements.xml << 'ENTITLEMENTS'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <!-- อนุญาต JIT compilation -->
+            <key>dynamic-codesigning</key>
+            <true/>
+            <!-- สำหรับ AltStore / SideStore JIT -->
+            <key>get-task-allow</key>
+            <true/>
+            <!-- MAP_JIT memory mapping -->
+            <key>com.apple.security.cs.allow-jit</key>
+            <true/>
+            <!-- Allow unsigned executable memory (Unicorn CPU emulation) -->
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+            <true/>
+            <!-- Disable library validation -->
+            <key>com.apple.security.cs.disable-library-validation</key>
+            <true/>
+            <!-- App sandbox -->
+            <key>com.apple.security.app-sandbox</key>
+            <false/>
+          </dict>
+          </plist>
+          ENTITLEMENTS
+
+          echo "Injecting entitlements into: $BINARY"
+          ldid -S/tmp/vita3k_entitlements.xml "$BINARY"
+          echo "Entitlements injected successfully"
+
+      # ─── 10. Package as .ipa ───────────────────────────────────────
+      - name: Package .ipa
+        id: package_ipa
+        run: |
+          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
+          APP_DIR=$(dirname "$APP_PATH")
+          IPA_NAME="Vita3K-iOS-$(date +'%Y%m%d')-$(git rev-parse --short HEAD).ipa"
+          IPA_PATH="$GITHUB_WORKSPACE/$IPA_NAME"
+
+          mkdir -p "$APP_DIR/Payload"
+          cp -R "$APP_PATH" "$APP_DIR/Payload/"
+
+          cd "$APP_DIR"
+          zip -qr "$IPA_PATH" Payload/
+          rm -rf Payload/
+
+          echo "IPA created: $IPA_PATH"
+          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+          # แสดง checksum
+          echo "### IPA Info" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **File**: \`$IPA_NAME\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Size**: $(du -sh "$IPA_PATH" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA256**: $(shasum -a 256 "$IPA_PATH" | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+      # ─── 11. Upload artifact (เก็บไว้ใน Actions) ───────────────────
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vita3K-iOS-IPA
+          path: ${{ steps.package_ipa.outputs.ipa_path }}
+          retention-days: 14
+
+      # ─── 12. Create/Update GitHub Release ─────────────────────────
+      - name: Determine release tag
+        id: release_tag
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${{ github.ref_name }}"
+          elif [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          else
+            TAG="build-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: "Vita3K iOS — ${{ steps.release_tag.outputs.tag }}"
+          body: |
+            ## 🎮 Vita3K iOS Port — Auto Build
+
+            ### การติดตั้ง
+            ดาวน์โหลด `.ipa` แล้วติดตั้งด้วยวิธีใดวิธีหนึ่ง:
+
+            | วิธี | JIT | หมายเหตุ |
+            |------|-----|---------|
+            | **TrollStore** | ✅ ทำงานอัตโนมัติ | iOS 14–17 บาง version เท่านั้น |
+            | **AltStore / SideStore** | ✅ ต้องเปิด JIT ด้วยตนเอง | ต้องมี AltServer/SideServer |
+            | **Sideloadly** | ⚠️ ไม่มี JIT | รันได้แต่ emulation ช้า |
+
+            ### JIT Entitlements ที่ใส่ไว้
+            - `dynamic-codesigning` — JIT memory mapping
+            - `get-task-allow` — AltJIT / StikJIT compatibility
+            - `com.apple.security.cs.allow-jit` — MAP_JIT support
+            - `com.apple.security.cs.allow-unsigned-executable-memory` — Unicorn CPU
+
+            ### Build Info
+            - **Commit**: `${{ github.sha }}`
+            - **Branch**: `${{ github.ref_name }}`
+            - **Build date**: ${{ github.run_started_at }}
+            - **Runner**: macOS 15 + Xcode 16.2
+
+            ---
+            > ⚠️ **หมายเหตุ**: IPA นี้เป็น unsigned build ต้องใช้ TrollStore หรือ sideload เท่านั้น
+          files: ${{ steps.package_ipa.outputs.ipa_path }}
+          draft: false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
